@@ -25,7 +25,7 @@ def _init_distances(A, D, TOTAL: tl.constexpr, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _nn_chain(D, LENGTH, RAW, N: tl.constexpr, NP: tl.constexpr):
+def _nn_chain(D, LENGTH, RAW, N: tl.constexpr, NP: tl.constexpr, SYMMETRIC: tl.constexpr = False):
     b = tl.program_id(0).to(tl.int64)
     n = tl.load(LENGTH + b)
     ix = tl.arange(0, NP)
@@ -71,8 +71,13 @@ def _nn_chain(D, LENGTH, RAW, N: tl.constexpr, NP: tl.constexpr):
         tl.store(RAW + at + 3, (nx + ny).to(tl.float64))
         size = tl.where(ix == lo, 0, tl.where(ix == hi, nx + ny, size))
         active = (size > 0) & (ix != hi)
-        dx = tl.load(D + base + ix * N + lo, mask=active, other=0.)
-        dy = tl.load(D + base + ix * N + hi, mask=active, other=0.)
+        if SYMMETRIC:
+            # Both triangles receive the same FP64 update; rows give contiguous loads.
+            dx = tl.load(D + base + lo * N + ix, mask=active, other=0.)
+            dy = tl.load(D + base + hi * N + ix, mask=active, other=0.)
+        else:
+            dx = tl.load(D + base + ix * N + lo, mask=active, other=0.)
+            dy = tl.load(D + base + ix * N + hi, mask=active, other=0.)
         # Match separate CPU FP64 mul/add and correctly rounded division.
         numerator = nx.to(tl.float64) * dx + ny.to(tl.float64) * dy
         updated = tl.inline_asm_elementwise('div.rn.f64 $0, $1, $2;',
@@ -84,7 +89,7 @@ def _nn_chain(D, LENGTH, RAW, N: tl.constexpr, NP: tl.constexpr):
         tl.debug_barrier()
 
 
-def raw_linkage_gpu(affinity, lengths):
+def raw_linkage_gpu(affinity, lengths, *, symmetric=False):
     """Return unsorted raw merge records on-device; input is already validated."""
     if affinity.ndim == 3 and affinity.shape[1] > 1024:
         # Joint image/caption grouping reaches 1,280 vertices; same FP64 algorithm.
@@ -104,7 +109,7 @@ def raw_linkage_gpu(affinity, lengths):
     _init_distances[(triton.cdiv(affinity.numel(), 1024),)](
         affinity, distances, affinity.numel(), 1024)
     _nn_chain[(batch,)](distances, lengths, raw, n, triton.next_power_of_2(n),
-                       num_warps=4, enable_fp_fusion=False)
+                       SYMMETRIC=symmetric, num_warps=4, enable_fp_fusion=False)
     return raw
 
 
@@ -164,7 +169,7 @@ def structure_gpu_exact(router, q, k, lengths=None):
             raise ValueError('Invalid normalized affinity')
         validated = time.perf_counter()
         lens = torch.from_numpy(lengths_np).to(q.device)
-        raw = raw_linkage_gpu(affinity, lens)
+        raw = raw_linkage_gpu(affinity, lens, symmetric=True)
         if getattr(router, '_host_raw_tree', None) is None or router._host_raw_tree.numel() < raw.numel():
             router._host_raw_tree = torch.empty(raw.numel(), dtype=torch.float64, pin_memory=True)
         host = router._host_raw_tree[:raw.numel()].view(raw.shape)

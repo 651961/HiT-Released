@@ -6,8 +6,11 @@
 import torch
 import torch.nn as nn
 import math
+import os
 import torch.nn.functional as F
 from util.model_util import VisionRotaryEmbeddingFast, get_2d_sincos_pos_embed, RMSNorm
+
+_USE_LIGER_SWIGLU = os.environ.get("HIT_LIGER_SWIGLU") == "1"
 
 
 def modulate(x, shift, scale):
@@ -154,8 +157,13 @@ class SwiGLUFFN(nn.Module):
 
     def forward(self, x):
         x12 = self.w12(x)
-        x1, x2 = x12.chunk(2, dim=-1)
-        hidden = F.silu(x1) * x2
+        if _USE_LIGER_SWIGLU and x12.is_cuda and x12.dtype in (torch.bfloat16, torch.float16, torch.float32):
+            from liger_kernel.ops.swiglu import LigerFusedGateUpSiLUMulFunction
+            rows = x12.reshape(-1, x12.shape[-1])
+            hidden = LigerFusedGateUpSiLUMulFunction.apply(rows, False).reshape(*x12.shape[:-1], self.w3.in_features)
+        else:
+            x1, x2 = x12.chunk(2, dim=-1)
+            hidden = F.silu(x1) * x2
         return self.w3(self.ffn_dropout(hidden))
 
 

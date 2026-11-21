@@ -4,12 +4,15 @@
 # --------------------------------------------------------
 
 from math import pi
+import os
 
 import torch
 from torch import nn
 import numpy as np
 
 from einops import rearrange, repeat
+
+_USE_QUACK_RMSNORM = os.environ.get("HIT_QUACK_RMSNORM") == "1"
 
 
 def broadcat(tensors, dim = -1):
@@ -145,6 +148,10 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
+        if _USE_QUACK_RMSNORM and hidden_states.is_cuda and input_dtype in (torch.bfloat16, torch.float16, torch.float32):
+            from quack import rmsnorm
+            rows = hidden_states.reshape(-1, hidden_states.shape[-1])
+            return rmsnorm(rows, self.weight, eps=self.variance_epsilon).reshape_as(hidden_states)
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)

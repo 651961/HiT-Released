@@ -1,11 +1,14 @@
 """JiT blocks with device-safe reference and optional packed execution."""
 import math
+import os
 import torch
 from torch import nn
 from torch.nn import functional as F
 from model_jit import SwiGLUFFN
 from util.model_util import RMSNorm
 from .runtime.packed_attention import packed_attention
+
+_USE_QUACK_ROPE = os.environ.get("HIT_QUACK_ROPE") == "1"
 
 
 class SpatialRoPE(nn.Module):
@@ -22,6 +25,13 @@ class SpatialRoPE(nn.Module):
         self.register_buffer('sin', torch.cat((torch.zeros(prefix, head_dim), grid.sin())), persistent=False)
 
     def forward(self, x):
+        if (_USE_QUACK_ROPE and x.is_cuda and x.ndim == 4 and x.stride(-1) == 1
+                and x.shape[-1] <= 512 and x.shape[-1] % 8 == 0
+                and x.dtype in (torch.float16, torch.bfloat16, torch.float32) and self.cos.dtype == torch.float32):
+            from quack.rotary import apply_rotary_emb
+            # Quack uses [batch, tokens, heads, dim] and one angle per adjacent channel pair.
+            qk = x.transpose(1, 2).float()
+            return apply_rotary_emb(qk, self.cos[:, ::2], self.sin[:, ::2], interleaved=True).transpose(1, 2)
         paired = x.reshape(*x.shape[:-1], -1, 2)
         rotated = torch.stack((-paired[..., 1], paired[..., 0]), -1).flatten(-2)
         return x * self.cos + rotated * self.sin

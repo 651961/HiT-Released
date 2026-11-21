@@ -21,6 +21,7 @@ class CleanJiT(nn.Module):
         initialization_rng = torch.get_rng_state()
         self.config = c = config or ModelConfig()
         self._fast_runtime = False
+        self.online_quantile = False
         side = c.image_size // c.patch_size
         self.t_embedder = TimestepEmbedder(c.width)
         self.y_embedder = LabelEmbedder(c.classes, c.width)
@@ -145,6 +146,7 @@ class CleanJiT(nn.Module):
                 tuple(length + context.shape[1] for length in lengths))
 
     def _two_stage(self, x, conditioning, context, return_aux):
+        collect_scores = self.training and self.online_quantile and return_aux
         c, ctx = self.config, self.context_count
         e, m, d = c.encoder_depth, c.intermediate_depth, c.decoder_depth
         inner_start, inner_stop = e + m, c.depth - d - m
@@ -154,7 +156,7 @@ class CleanJiT(nn.Module):
         context, x = x[:, :ctx], x[:, ctx:]
 
         residual1 = self.skip(x)
-        compact1, assignment1, valid1, structure1, soft1 = self.router(x, need_budget=return_aux)
+        compact1, assignment1, valid1, structure1, soft1 = self.router(x, need_budget=return_aux and not collect_scores)
         stats1 = dict(self.router.last_statistics)
         value, mask, lengths = self._with_context(compact1, valid1, structure1.lengths, context)
         value = self._compact_stage(value, conditioning, mask, lengths, e, inner_start)
@@ -162,7 +164,7 @@ class CleanJiT(nn.Module):
 
         residual2 = self.skip2(h1)
         compact2, assignment2, valid2, structure2, soft2 = self.router2(
-            h1, valid1, structure1.counts, structure1.lengths, need_budget=return_aux)
+            h1, valid1, structure1.counts, structure1.lengths, need_budget=return_aux and not collect_scores)
         value, mask, lengths = self._with_context(compact2, valid2, structure2.lengths, context)
         value = self._compact_stage(value, conditioning, mask, lengths, inner_start, inner_stop)
         inner, context = value[:, ctx:], value[:, :ctx]
@@ -177,6 +179,8 @@ class CleanJiT(nn.Module):
         for block in self.blocks[c.depth - d:]:
             x = block(x, conditioning, self.rope_context)
         aux = dict(stats1)
+        if collect_scores:
+            aux['merge_scores'] = (structure1.scores.detach(), structure2.scores.detach())
         aux.update(hard_counts=structure1.counts, soft_counts=soft1, token_count=assignment1.shape[1],
                    hard_counts2=structure2.counts, soft_counts2=soft2, stage2=dict(self.router2.last_statistics),
                    residual_rms=_diagnostic_rms(residual1, self._fast_runtime),

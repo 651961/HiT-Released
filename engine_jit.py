@@ -3,6 +3,7 @@ from contextlib import nullcontext
 import time
 import torch
 import torch.distributed as dist
+from hnet.quantile import MergeHistograms
 
 
 def autocast(device, dtype):
@@ -25,6 +26,7 @@ def train_update(model, raw, optimizer, ema, iterator, generator, device, recipe
     for group in optimizer.param_groups: group['lr'] = lr
     accumulation = recipe['accumulation']
     metrics, ids_seen = {}, []
+    histograms = MergeHistograms(device) if raw.net.online_quantile else None
     for _ in range(accumulation):
         images, labels, ids = next(iterator)
         images = images.to(device, non_blocking=True).float() / 127.5 - 1
@@ -33,6 +35,8 @@ def train_update(model, raw, optimizer, ema, iterator, generator, device, recipe
             result = model(images, labels, generator)
         collective_finite(result['loss'])
         (result['loss'] / accumulation).backward()
+        if histograms is not None:
+            histograms.add(result['aux'])
         for key in ('loss', 'generation', 'budget', 'budget1', 'budget2', 'hard_fraction', 'hard_fraction2'):
             if key in result:
                 metrics[key] = metrics.get(key, 0.) + result[key].detach().float() / accumulation
@@ -45,6 +49,8 @@ def train_update(model, raw, optimizer, ema, iterator, generator, device, recipe
     norm = torch.linalg.vector_norm(torch.stack(torch._foreach_norm(gradients, 2)))
     collective_finite(norm)
     optimizer.step(); ema.update(raw)
+    if histograms is not None:
+        metrics.update(histograms.apply(raw.net))
     if device.type == 'cuda': torch.cuda.synchronize(device)
     duration = torch.tensor(time.perf_counter() - started, device=device)
     if dist.is_initialized():

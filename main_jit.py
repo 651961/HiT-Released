@@ -50,6 +50,8 @@ def main():
     p.add_argument('--data-format', choices=['cached', 'indexed', 'folder'], default='cached')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--resume', action='store_true')
+    p.add_argument('--online-quantile', action='store_true',
+                   help='ImageNet HiT: replace the budget loss with per-update merge-score calibration')
     p.add_argument('--device', choices=['cpu', 'cuda'], default='cuda')
     p.add_argument('--max-updates', type=int, default=0, help='Diagnostic stop, with full recovery; not a new LR horizon')
     p.add_argument('--no-eval', action='store_true', help='Explicit diagnostic-only omission of FID')
@@ -59,6 +61,10 @@ def main():
     p.add_argument('--wandb-entity', default=None)
     args = p.parse_args()
     config, recipe, runtime = load_config(args.model, args.training, args.runtime)
+    if args.online_quantile:
+        if config.variant != 'hnet':
+            raise ValueError('--online-quantile requires HiT')
+        recipe['online_quantile'] = True
     rank, world, local = [int(os.environ.get(k, d)) for k, d in [('RANK', 0), ('WORLD_SIZE', 1), ('LOCAL_RANK', 0)]]
     if args.device == 'cuda': torch.cuda.set_device(local)
     device = torch.device('cuda', local) if args.device == 'cuda' else torch.device('cpu')
@@ -83,6 +89,7 @@ def main():
     if config.image_size != 256: raise ValueError('This ImageNet recipe uses 256px crops')
     if len(dataset) < recipe['global_batch']: raise ValueError('Dataset smaller than one global update')
     raw = Objective(config).to(device)
+    raw.net.online_quantile = args.online_quantile
     execution = configure_model_execution(raw.net, runtime)
     identity = canonical(dict(world_size=world, microbatch=micro, model=asdict(config), recipe=recipe,
                               runtime=runtime, execution=execution, dataset=dataset.fingerprint,

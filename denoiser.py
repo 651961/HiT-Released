@@ -33,6 +33,8 @@ class Objective(nn.Module):
         prediction, auxiliary = self.net(noisy, t, labels, return_aux=True)
         velocity = (prediction - noisy) / denominator
         generation = (target - velocity).square().mean()
+        if self.net.online_quantile:
+            return {'loss': generation, 'generation': generation, 't': t.detach(), 'aux': auxiliary}
         extra = {}
         if self.net.router is not None:
             budget, hard_fraction, soft_fraction = budget_loss(

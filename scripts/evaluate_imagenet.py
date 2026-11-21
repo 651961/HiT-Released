@@ -47,6 +47,9 @@ def ema_parameters(path, decay):
             if decay not in decays:
                 raise ValueError(f'{path} holds EMA decays {decays}, not {decay}')
             state = dict(zip(ema['names'], ema['values'][decays.index(decay)]))
+            if checkpoint.get('identity', {}).get('recipe', {}).get('online_quantile'):
+                for key in ('net.router.threshold', 'net.router2.threshold'):
+                    state[key] = checkpoint['model'][key]
         else:
             raise ValueError(f'Unrecognized checkpoint layout: {path}')
     return {name[len('net.'):] if name.startswith('net.') else name: value for name, value in state.items()}
@@ -82,6 +85,8 @@ def main():
     net = CleanJiT(config)
     parameters = ema_parameters(args.checkpoint, args.ema)
     expected = {name for name, _ in net.named_parameters()}
+    if net.router is not None and 'router.threshold' in parameters:
+        expected.update(('router.threshold', 'router2.threshold'))
     if set(parameters) != expected:
         missing, extra = sorted(expected - set(parameters))[:5], sorted(set(parameters) - expected)[:5]
         raise RuntimeError(f'Checkpoint does not match {args.model}: missing {missing}, unexpected {extra}')

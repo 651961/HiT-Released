@@ -35,6 +35,8 @@ def main():
     config, _, _ = load_config(args.model)
     expected = {name for name, _ in CleanJiT(config).named_parameters()}
     parameters = ema_parameters(args.checkpoint, args.ema)
+    if config.variant == 'hnet' and 'router.threshold' in parameters:
+        expected.update(('router.threshold', 'router2.threshold'))
     if set(parameters) != expected:
         raise RuntimeError(f'Checkpoint does not match {args.model}')
     checkpoint = torch.load(args.checkpoint, map_location='cpu', mmap=True, weights_only=False)

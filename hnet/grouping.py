@@ -12,8 +12,6 @@ import time
 
 import numpy as np
 from numba import njit, prange, set_num_threads
-from scipy.cluster.hierarchy import linkage
-from scipy.cluster import _hierarchy
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -85,6 +83,8 @@ def exact_tree(similarity, threshold):
     if n == 1:
         z = np.empty((0, 4), dtype=np.float64)
     else:
+        from scipy.cluster import _hierarchy
+
         upper = upper_indices(n)
         distances = 1.0 - similarity[upper].astype(np.float64)
         # Normalized-dot roundoff can exceed 1 by a few FP32 ulps.
